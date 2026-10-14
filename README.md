@@ -2,9 +2,22 @@
 
 A **GPT-2 Small–class decoder-only language model** (~124M parameters in its default configuration) implemented in plain PyTorch, with a complete pipeline around it: tokenization, memory-mapped data, training, evaluation, checkpointing and text generation.
 
+> **Note:** This is a learning project built to understand the internals; it is not trained to convergence. The ~124M configuration describes the architecture; no trained weights are published.
+
 ## Why I built it
 
 I wanted to understand how a modern language model works from first principles, following Andrej Karpathy-style material, rather than only calling a hosted API. Writing the model and the training loop myself meant every tensor had a shape, a dtype and a device I could inspect. That is why the project includes a configurable tensor logger that traces data as it flows through the model. TorchLLM follows an earlier from-scratch version I wrote in pure Java ([JavaLLM](https://github.com/Adaggubati404/JavaLLM)).
+
+## What this taught me
+
+- **How data moves during training.** Text becomes GPT-2 BPE token ids, is stored once as a memory-mapped file, and is sampled as windows where the target `y` is the input `x` shifted by one token.
+- **Where the matrix multiplications are.** The query/key/value projections, the attention scores, the MLP layers and the LM head are all matrix multiplies, and the tensor logger shows the shape at every step.
+- **How loss is calculated.** Cross-entropy between the logits and the next-token targets, and perplexity as its exponent during evaluation. An untrained model starts near ln(50304) ≈ 10.8.
+- **How backpropagation drives training.** `loss.backward()` computes the gradients. Then gradient accumulation, clipping and AdamW (with warmup and cosine decay) turn them into parameter updates.
+- **Why inference doesn't need backpropagation.** Evaluation and generation run under `torch.no_grad()`: only the forward pass, with no gradients stored.
+- **How temperature and top-k shape output.** Temperature flattens or sharpens the next-token distribution, and top-k cuts off unlikely tokens.
+- **How layer normalization helps training.** Pre-LayerNorm blocks keep each layer's inputs on a stable scale, so the residual stack trains reliably as it gets deeper.
+- **Memory is a real constraint.** The same ~124M architecture needs different batch, accumulation and precision settings on CUDA and on Apple MPS.
 
 ## Features
 
@@ -92,7 +105,7 @@ python -m torchllm.train --config configs/gpt2_small_mps.yaml --data-dir data/my
   --resume checkpoints/gpt2_small_mps/ckpt_last.pt
 ```
 
-Useful overrides: `--batch-size`, `--grad-accum-steps`, `--dtype`, `--max-iters`, `--out-dir`. If you run out of memory, lower the batch size first. A useful ~100M-parameter model needs billions of training tokens; the bundled sample corpus only proves that the pipeline works.
+Useful overrides: `--batch-size`, `--grad-accum-steps`, `--dtype`, `--max-iters`, `--out-dir`. If you run out of memory, lower the batch size first. A useful ~100M-parameter model needs billions of training tokens. This project intentionally stops at the bundled sample corpus, which is enough to exercise the full pipeline.
 
 ### Tensor debug logging
 
@@ -108,23 +121,6 @@ Example log line:
 ```
 
 Logging is off by default, but `configs/smoke.yaml` turns it on. YAML options include `tensor_log_every`, `tensor_log_max_steps`, `tensor_log_model`, `tensor_log_data`, `tensor_log_values` and `tensor_log_blocks` (`first` | `all`). Logging every layer on every step is expensive, so keep `tensor_log_max_steps` low.
-
-## Results
-
-> **TODO (Ashok):** add real numbers from your own runs. Do not copy expected values.
->
-> - Hardware used: `<GPU / Apple chip / CPU>`
-> - Config and dataset: `<config, corpus, token count>`
-> - Training loss: `<step → loss>` (for reference, a randomly initialized model starts near ln(50304) ≈ 10.8)
-> - Validation loss / perplexity: `<value>`
-
-### Sample generation
-
-> **TODO (Ashok):** paste real output from `torchllm.generate`.
-
-```text
-<paste generated text here>
-```
 
 ## Project structure
 
@@ -152,22 +148,16 @@ torchllm/
 pyproject.toml
 ```
 
-## What I learned
-
-- How text becomes a training signal: BPE tokens, memory-mapped token files, and shifted input/target windows for next-token prediction.
-- The decoder-only transformer end to end: embeddings, causal self-attention, pre-LayerNorm residual blocks, GELU MLPs, and why the LM head can share weights with the token embedding.
-- The practical side of training: AdamW parameter groups, warmup plus cosine decay, gradient accumulation to reach a target tokens-per-step, gradient clipping, and mixed precision on different hardware.
-- Memory is a real constraint. The same model needs different batch and accumulation settings on CUDA and on Apple MPS.
-- Logging tensor shapes and devices is one of the fastest ways to understand, and debug, how data flows through a model.
-
 ## Next steps
 
 These are not implemented yet:
 
-- Train on a larger public corpus and publish loss curves and sample outputs.
 - Add unit tests for the model, data pipeline and LR schedule.
 - Compare outputs and loss against a reference GPT-2 implementation.
-- Experiment with fine-tuning, building on this toward fine-tuning open-source models.
+
+## Roadmap
+
+This project is one step in learning the AI stack from the ground up before moving into agentic engineering. **Next: fine-tuning the open-source Qwen model and building a real agentic application on top of it.**
 
 ## License
 
