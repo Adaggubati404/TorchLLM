@@ -16,3 +16,5 @@ data/**/*.bin
 .DS_Store
 *.pt
 metrics.jsonl
+.vscode/
+.idea/
