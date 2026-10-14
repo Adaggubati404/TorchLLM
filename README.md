@@ -1,189 +1,174 @@
 # TorchLLM
 
-GPT-2 Small–class (~124M parameters) decoder-only language model in pure PyTorch.
+A **GPT-2 Small–class decoder-only language model** (~124M parameters in its default configuration) implemented in plain PyTorch, with a complete pipeline around it: tokenization, memory-mapped data, training, evaluation, checkpointing and text generation.
+
+## Why I built it
+
+I wanted to understand how a modern language model works from first principles, following Andrej Karpathy-style material, rather than only calling a hosted API. Writing the model and the training loop myself meant every tensor had a shape, a dtype and a device I could inspect. That is why the project includes a configurable tensor logger that traces data as it flows through the model. TorchLLM follows an earlier from-scratch version I wrote in pure Java ([JavaLLM](https://github.com/Adaggubati404/JavaLLM)).
 
 ## Features
 
-- Config-driven model (`gpt2_small` ≈ 124M, plus a tiny `smoke` config)
-- GPT-2 BPE via `tiktoken`, vocab padded to 50304
-- Memmap data pipeline (`train.bin` / `val.bin`)
-- AdamW with decay/no-decay groups, linear warmup + cosine LR
-- Gradient accumulation, mixed precision (BF16/FP16 when available)
-- Checkpoints: `ckpt_last.pt`, `ckpt_best.pt`, stepped saves + resume
-- Eval (loss / perplexity) and temperature + top-k generation
-- Optional tensor debug logs (shape, dtype, device) via config/CLI
+- **Config-driven model:** YAML configs for the full `gpt2_small` model (~124M parameters), an Apple Silicon variant (`gpt2_small_mps`), and a tiny `smoke` model for quick tests.
+- **GPT-2 BPE tokenization** via `tiktoken`, with the vocabulary padded from 50,257 to 50,304 to a multiple of 64.
+- **Memmap data pipeline:** raw `.txt` / `.jsonl` (with a `text` field) is encoded once into `uint16` `train.bin` / `val.bin` files.
+- **Training:** AdamW with decay/no-decay parameter groups, linear warmup plus cosine learning-rate decay, gradient accumulation, gradient clipping, and mixed precision (BF16/FP16 when available, with a gradient scaler where needed).
+- **Device support:** CUDA, Apple MPS, or CPU, chosen automatically; optional `torch.compile` on CUDA.
+- **Checkpoints:** `ckpt_last.pt`, `ckpt_best.pt`, periodic step checkpoints (keeping the last *k*), and `--resume`.
+- **Evaluation:** validation loss and perplexity.
+- **Generation:** temperature and top-k sampling from a checkpoint.
+- **Metrics:** training metrics written to `metrics.jsonl`.
+- **Tensor debug logging:** optional logs of tensor shape, dtype, device, element count and bytes at key points in training, the model and generation, plus optional value statistics.
 
-## Install
+## Architecture
+
+```
+token ids ──► token embedding (wte) + learned position embedding (wpe) ──► dropout
+          ──► N × Block [ LayerNorm → causal self-attention → residual
+                          LayerNorm → MLP (GELU) → residual ]
+          ──► final LayerNorm ──► LM head (weights tied to wte) ──► logits
+```
+
+- Pre-LayerNorm transformer blocks with residual connections.
+- Causal self-attention using PyTorch's `scaled_dot_product_attention`.
+- MLP with GELU activation.
+- The LM head shares its weights with the token embedding (weight tying), and residual projections use GPT-2-style initialization scaling.
+
+| Setting | `gpt2_small` | `smoke` |
+| --- | --- | --- |
+| layers / embedding dim / heads | 12 / 768 / 12 | 2 / 128 / 4 |
+| context length | 1024 | 64 |
+| vocabulary | 50,304 | 50,304 |
+| peak / min LR | 3e-4 / 3e-5 (2,000 warmup steps) | 3e-4 / 3e-5 (20 warmup steps) |
+| batch × grad accumulation | 8 × 8 (CUDA); 1 × 64 on MPS (`gpt2_small_mps`) | 4 × 2 |
+| default steps | 100,000 | 200 |
+
+At context length 1024, both `gpt2_small` variants process 65,536 tokens per optimizer step.
+
+## Getting started
+
+**Requirements:** Python 3.10+ and a working PyTorch install for your platform ([pytorch.org](https://pytorch.org)). Other dependencies (`tiktoken`, `numpy`, `tqdm`, `PyYAML`) install with the package.
 
 ```bash
-cd TorchLLM
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -e .
 ```
 
-Requires Python 3.10+ and a working PyTorch install for your platform ([pytorch.org](https://pytorch.org)).
-
-## Quick start (smoke train)
-
-Tokenize the sample corpus, train a tiny model, evaluate, generate:
+### Quick smoke run
 
 ```bash
-# 1) Prepare tokens
+# 1) Tokenize the sample corpus
 python -m data.prepare --input data/sample --out data/sample_bin --val-ratio 0.1
 
-# 2) Estimate params for a config (optional)
+# 2) (Optional) Print the parameter count for a config
 python scripts/estimate_params.py --config configs/gpt2_small.yaml
-python scripts/estimate_params.py --config configs/smoke.yaml
 
-# 3) Smoke train (CPU/MPS/CUDA friendly)
+# 3) Train the tiny smoke model
 python -m torchllm.train --config configs/smoke.yaml --data-dir data/sample_bin
 
-# 4) Evaluate best checkpoint
-python -m torchllm.evaluate \
-  --checkpoint checkpoints/smoke/ckpt_best.pt \
-  --data-dir data/sample_bin
+# 4) Evaluate the best checkpoint
+python -m torchllm.evaluate --checkpoint checkpoints/smoke/ckpt_best.pt --data-dir data/sample_bin
 
-# 5) Generate
-python -m torchllm.generate \
-  --checkpoint checkpoints/smoke/ckpt_best.pt \
-  --prompt "Once upon a time" \
-  --max-new-tokens 80 \
-  --temperature 0.8 \
-  --top-k 50
+# 5) Generate text
+python -m torchllm.generate --checkpoint checkpoints/smoke/ckpt_best.pt \
+  --prompt "Once upon a time" --max-new-tokens 80 --temperature 0.8 --top-k 50
 ```
 
-Or: `bash scripts/train.sh configs/smoke.yaml data/sample_bin`
+Or run training with `bash scripts/train.sh configs/smoke.yaml data/sample_bin`. After `pip install -e .`, the commands `torchllm-train`, `torchllm-evaluate` and `torchllm-generate` are also available.
 
-## Full ~124M pretrain
-
-Architecture defaults (`configs/gpt2_small.yaml` for CUDA; `configs/gpt2_small_mps.yaml` for Mac):
-
-| | |
-|---|---|
-| layers / dim / heads | 12 / 768 / 12 |
-| context | 1024 |
-| vocab | 50304 (GPT-2 + pad) |
-| peak LR | 3e-4 (warmup 2k → cosine to 3e-5) |
-| batch (CUDA) | `B=8`, accum `8` → **65,536 tokens/step** |
-| batch (MPS) | `B=1`, accum `64` → **65,536 tokens/step** (same effective size) |
-| default steps | 100,000 (~6.6B tokens at default batch) |
-
-Prepare a larger corpus (directory of `.txt` / `.jsonl` with a `text` field), then train:
+### Full ~124M pretraining
 
 ```bash
 python -m data.prepare --input /path/to/corpus --out data/my_corpus_bin --val-ratio 0.05
 
-# CUDA / high VRAM
-python -m torchllm.train \
-  --config configs/gpt2_small.yaml \
-  --data-dir data/my_corpus_bin
+# CUDA
+python -m torchllm.train --config configs/gpt2_small.yaml --data-dir data/my_corpus_bin
 
-# Apple Silicon (MPS) — required to avoid OOM at full context
-python -m torchllm.train \
-  --config configs/gpt2_small_mps.yaml \
-  --data-dir data/my_corpus_bin
+# Apple Silicon (MPS): batch size 1 with 64 accumulation steps to avoid running out of memory
+python -m torchllm.train --config configs/gpt2_small_mps.yaml --data-dir data/my_corpus_bin
 
-# Or override the CUDA config for MPS:
-python -m torchllm.train \
-  --config configs/gpt2_small.yaml \
-  --data-dir data/my_corpus_bin \
-  --batch-size 1 --grad-accum-steps 64 --dtype float16
-
-# resume
-python -m torchllm.train \
-  --config configs/gpt2_small_mps.yaml \
-  --data-dir data/my_corpus_bin \
+# Resume from the last checkpoint
+python -m torchllm.train --config configs/gpt2_small_mps.yaml --data-dir data/my_corpus_bin \
   --resume checkpoints/gpt2_small_mps/ckpt_last.pt
 ```
 
-### Apple Silicon / MPS OOM
+Useful overrides: `--batch-size`, `--grad-accum-steps`, `--dtype`, `--max-iters`, `--out-dir`. If you run out of memory, lower the batch size first. A useful ~100M-parameter model needs billions of training tokens; the bundled sample corpus only proves that the pipeline works.
 
-`configs/gpt2_small.yaml` uses `B=8 × T=1024` with BF16. On MPS, BF16 falls back to **float16** automatically, but the large micro-batch still OOMs (~20 GiB budget). Use **`configs/gpt2_small_mps.yaml`** (`B=1`, accum `64`, float16). If memory is still tight, lower `block_size` (e.g. 512) in a copy of that config.
-
-### Hardware notes
-
-| VRAM | Suggestion |
-|---|---|
-| 8–12 GB | `batch_size: 1–2`, raise `grad_accum_steps` |
-| 16–24 GB CUDA | defaults (`B=8`, accum `8`) with BF16 |
-| MPS (Apple) | `configs/gpt2_small_mps.yaml` |
-| 40+ GB | larger `B`, fewer accum steps; aim 0.25–0.5M tokens/step |
-| CPU / small data | `configs/smoke.yaml` only |
-
-If you OOM, lower `train.batch_size` first (CLI: `--batch-size 1`).
-
-### Tensor debug logging (shape / dtype / device)
-
-Off by default. When enabled, logs tensor **shape**, **dtype**, **device location**, **numel**, and **bytes** at major train/model sites (`[tensor] ...` lines).
-
-YAML (`train` section):
-
-```yaml
-tensor_log: true
-tensor_log_every: 1          # log on steps where it % every == 0
-tensor_log_max_steps: 5      # stop after N training steps (0 = unlimited)
-tensor_log_model: true       # GPT / attention / MLP / blocks
-tensor_log_data: true        # train batches x/y
-tensor_log_values: false     # optional mean/std/min/max
-tensor_log_full: false       # dump small tensor bodies
-tensor_log_full_max: 32
-tensor_log_blocks: first     # first | all  (layer span for block logs)
-```
-
-CLI:
+### Tensor debug logging
 
 ```bash
-# short smoke run with tensor traces
-python -m torchllm.train \
-  --config configs/smoke.yaml \
-  --data-dir data/sample_bin \
-  --max-iters 2 \
-  --tensor-log \
-  --tensor-log-max-steps 2
-
-# with activation stats
-python -m torchllm.train ... --tensor-log --tensor-log-values
-
-# generate with logs
-python -m torchllm.generate \
-  --checkpoint checkpoints/smoke/ckpt_best.pt \
-  --tensor-log \
-  --tensor-log-max-steps 3 \
-  --prompt "Once upon a time"
+python -m torchllm.train --config configs/smoke.yaml --data-dir data/sample_bin \
+  --max-iters 2 --tensor-log --tensor-log-max-steps 2
 ```
 
-Example line:
+Example log line:
 
 ```text
 [tensor] where=GPT.forward idx shape=(4, 64) dtype=int64 device=mps:0 numel=256 bytes=2048
 ```
 
-**Warning:** logging every layer on every step is expensive. Keep `tensor_log_max_steps` low and prefer `tensor_log_blocks: first` for routine debugging.
+Logging is off by default, but `configs/smoke.yaml` turns it on. YAML options include `tensor_log_every`, `tensor_log_max_steps`, `tensor_log_model`, `tensor_log_data`, `tensor_log_values` and `tensor_log_blocks` (`first` | `all`). Logging every layer on every step is expensive, so keep `tensor_log_max_steps` low.
 
-### Expected loss (directional)
+## Results
 
-- Random init ≈ `ln(50304) ≈ 10.8`
-- Sample smoke overfit: train loss should fall clearly within a few hundred steps
-- Open-web pretrain of a ~100M model after billions of tokens often lands around val CE **~3.0–3.5** (data-dependent)
+> **TODO (Ashok):** add real numbers from your own runs. Do not copy expected values.
+>
+> - Hardware used: `<GPU / Apple chip / CPU>`
+> - Config and dataset: `<config, corpus, token count>`
+> - Training loss: `<step → loss>` (for reference, a randomly initialized model starts near ln(50304) ≈ 10.8)
+> - Validation loss / perplexity: `<value>`
 
-A useful 100M model needs **billions of tokens**. The sample path only proves the pipeline.
+### Sample generation
 
-## Project layout
+> **TODO (Ashok):** paste real output from `torchllm.generate`.
+
+```text
+<paste generated text here>
+```
+
+## Project structure
 
 ```
-configs/           # gpt2_small.yaml, gpt2_small_mps.yaml, smoke.yaml
-data/prepare.py    # raw text → train.bin / val.bin
-data/sample/       # tiny corpus for smoke tests
+configs/
+  gpt2_small.yaml        # ~124M model, CUDA defaults
+  gpt2_small_mps.yaml    # same model, memory-safe for Apple MPS
+  smoke.yaml             # tiny model for quick tests
+data/
+  prepare.py             # raw text / jsonl → train.bin / val.bin
+  sample/input.txt       # tiny sample corpus
+scripts/
+  estimate_params.py     # parameter count for a config
+  train.sh               # training wrapper
 torchllm/
-  model.py         # GPT decoder
-  train.py         # training loop
-  evaluate.py      # val loss / ppl
-  generate.py      # sampling
-  tensor_log.py    # configurable tensor shape/device debug logs
-scripts/estimate_params.py
+  config.py              # model and training config dataclasses, YAML loading
+  tokenizer.py           # GPT-2 BPE via tiktoken, padded vocab
+  dataset.py             # memmap dataset and batching
+  model.py               # GPT decoder: attention, MLP, blocks, generation
+  train.py               # training loop, eval, checkpoints, metrics
+  evaluate.py            # validation loss / perplexity
+  generate.py            # sampling CLI
+  tensor_log.py          # configurable tensor shape/dtype/device logging
+  utils.py               # seeding, device, mixed precision, LR schedule, optimizer, checkpoints
+pyproject.toml
 ```
+
+## What I learned
+
+- How text becomes a training signal: BPE tokens, memory-mapped token files, and shifted input/target windows for next-token prediction.
+- The decoder-only transformer end to end: embeddings, causal self-attention, pre-LayerNorm residual blocks, GELU MLPs, and why the LM head can share weights with the token embedding.
+- The practical side of training: AdamW parameter groups, warmup plus cosine decay, gradient accumulation to reach a target tokens-per-step, gradient clipping, and mixed precision on different hardware.
+- Memory is a real constraint. The same model needs different batch and accumulation settings on CUDA and on Apple MPS.
+- Logging tensor shapes and devices is one of the fastest ways to understand, and debug, how data flows through a model.
+
+## Next steps
+
+These are not implemented yet:
+
+- Train on a larger public corpus and publish loss curves and sample outputs.
+- Add unit tests for the model, data pipeline and LR schedule.
+- Compare outputs and loss against a reference GPT-2 implementation.
+- Experiment with fine-tuning, building on this toward fine-tuning open-source models.
 
 ## License
 
-MIT (project scaffolding; you own your models and data).
+MIT. See [LICENSE](LICENSE).
