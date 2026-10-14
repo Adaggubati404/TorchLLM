@@ -1,0 +1,32 @@
+# Same ~124M architecture as gpt2_small.yaml, memory-safe for Apple MPS.
+# Keeps tokens/step = 1 * 1024 * 64 = 65,536 (matches CUDA default B=8 accum=8).
+model:
+  n_layer: 12
+  n_embd: 768
+  n_head: 12
+  block_size: 1024
+  vocab_size: 50304
+  dropout: 0.0
+  bias: true
+
+train:
+  out_dir: checkpoints/gpt2_small_mps
+  batch_size: 1
+  grad_accum_steps: 64
+  max_iters: 100000
+  lr: 3.0e-4
+  min_lr: 3.0e-5
+  warmup_iters: 2000
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+  eval_interval: 500
+  eval_iters: 20
+  log_interval: 10
+  save_interval: 2000
+  dtype: float16
+  seed: 1337
+  compile: false
+  num_workers: 0
+  keep_last_k: 3

@@ -1,0 +1,39 @@
+model:
+  n_layer: 2
+  n_embd: 128
+  n_head: 4
+  block_size: 64
+  vocab_size: 50304
+  dropout: 0.1
+  bias: true
+
+train:
+  out_dir: checkpoints/smoke
+  batch_size: 4
+  grad_accum_steps: 2
+  max_iters: 200
+  lr: 3.0e-4
+  min_lr: 3.0e-5
+  warmup_iters: 20
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+  eval_interval: 50
+  eval_iters: 20
+  log_interval: 10
+  save_interval: 10000
+  dtype: float32
+  seed: 1337
+  compile: false
+  num_workers: 0
+  keep_last_k: 2
+  # Tensor debug logs (shape/dtype/device). Off by default for performance.
+  tensor_log: true
+  # tensor_log_every: 1
+  # tensor_log_max_steps: 2
+  # tensor_log_model: true
+  # tensor_log_data: true
+  # tensor_log_values: false
+  # tensor_log_full: false
+  # tensor_log_blocks: first

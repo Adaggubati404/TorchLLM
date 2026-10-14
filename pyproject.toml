@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torchllm"
+version = "0.1.0"
+description = "GPT-2 Small–class (~124M) decoder-only LLM in pure PyTorch"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1.0",
+    "tiktoken>=0.5.0",
+    "numpy>=1.24.0",
+    "tqdm>=4.66.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+torchllm-train = "torchllm.train:main"
+torchllm-generate = "torchllm.generate:main"
+torchllm-evaluate = "torchllm.evaluate:main"
+
+[tool.setuptools.packages.find]
+include = ["torchllm*", "data*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.yaml", "*.txt"]
